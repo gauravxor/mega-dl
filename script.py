@@ -8,7 +8,9 @@ from selenium.common.exceptions import NoSuchElementException
 import requests
 import os
 import logging
+import time
 from dotenv import load_dotenv
+from pathlib import Path
 
 load_dotenv()
 from config import LOGGER_CONFIG
@@ -35,10 +37,12 @@ class ISP(IP):
     ISP_URL = None
     DRIVER = None
     LOGGED_IN = False
+    IP_LOG_FILE = None
+    RETRY_BACKOFF = None
 
     def __init__(self):
         driver_options = Options()
-        # driver_options.add_argument("--headless")
+        driver_options.add_argument("--headless")
         driver_options.add_argument("--disable-gpu")
 
         self.DRIVER = webdriver.Chrome(
@@ -50,6 +54,11 @@ class ISP(IP):
         self.DRIVER.get(self.ISP_URL)
         self.load_isp_site()
         self.LOGGED_IN = self.is_loggedin()
+        self.IP_LOG_FILE = Path(__file__).parent / 'ip_addrs.txt'
+        if not self.IP_LOG_FILE.exists():
+            self.IP_LOG_FILE.touch()
+
+        self.RETRY_BACKOFF = 5
 
     def load_isp_site(self):
         self.DRIVER.get(self.ISP_URL)
@@ -59,10 +68,10 @@ class ISP(IP):
             logger.info('Attempting to logout...')
             self.load_isp_site()
             logout_element = self.DRIVER.find_element(By.CSS_SELECTOR, "input.ask3")
-            logger.info('Found the logout button')
+            logger.debug('Found the logout button')
 
             logout_element.click()
-            logger.info('Clicked the logout button, waiting for the action to complete...')
+            logger.debug('Clicked the logout button, waiting for the action to complete...')
 
             WebDriverWait(self.DRIVER, 10).until(
                 EC.invisibility_of_element_located((By.CSS_SELECTOR, "input.ask3"))
@@ -78,19 +87,19 @@ class ISP(IP):
 
             self.load_isp_site()
             username_element = self.DRIVER.find_element(By.ID, "username")
-            logger.info('Found the username input field')
+            logger.debug('Found the username input field')
 
             password_element = self.DRIVER.find_element(By.ID, "password")
-            logger.info('Found the password input field')
+            logger.debug('Found the password input field')
 
             login_button_element = self.DRIVER.find_element(By.CSS_SELECTOR, "button.btnlink1")
-            logger.info('Found the login button')
+            logger.debug('Found the login button')
 
-            logger.info('Populating credentials...')
+            logger.debug('Populating credentials...')
             username_element.send_keys(os.getenv('ISP_USERNAME'))
             password_element.send_keys(os.getenv('ISP_PASSWORD'))
 
-            logger.info('Clicked the login button...waiting for the action to complete...')
+            logger.debug('Clicked the login button...waiting for the action to complete...')
             login_button_element.click()
             WebDriverWait(self.DRIVER, 10).until(
                 EC.invisibility_of_element_located((By.CSS_SELECTOR, "button.btnlink1"))
@@ -111,18 +120,58 @@ class ISP(IP):
             logger.info('Unable to find logout button...User not logged in')
             return False
 
+    def get_old_ip_addrs(self):
+        ip_list = []
+        try:
+            with self.IP_LOG_FILE.open('r') as file:
+                ip_list = [line.strip() for line in file if line.strip()]
+        except Exception as e:
+            logger.error(f'Failed to get the list of old ip addresses. {str(e)}', exc_info=True)
+        finally:
+            return ip_list
+
+    def log_ip(self, public_ip=None):
+
+        if public_ip is None:
+            return
+
+        try:
+            with self.IP_LOG_FILE.open('a') as file:
+                file.write(f"{public_ip}\n")
+        except Exception as e:
+            logger.error(f'Error logging IP - {public_ip}. Error - {str(e)}', exc_info=True)
+
+    def is_ip_rotated(self):
+        public_ip = self.get_public_ip()
+        old_ip_adds = self.get_old_ip_addrs()
+
+        if len(old_ip_adds) == 0:
+            self.log_ip(public_ip)
+            return False
+
+        if public_ip not in old_ip_adds:
+            self.log_ip(public_ip)
+            return True
+
+        return False
+
     def rotate_ip(self):
-        pass
+        if not self.LOGGED_IN:
+            logger.info('Logging into ISP portal...')
+            self.login()
+
+        while True:
+            if self.is_ip_rotated():
+                logger.info('Rotated the public IP')
+                return True
+            else:
+                logger.info('Logging out, because ISP did not provide new IP')
+                self.logout()
+                logger.info(f'Waiting for {self.RETRY_BACKOFF} seconds before logging in again...')
+                time.sleep(self.RETRY_BACKOFF)
+                self.login()
+                self.RETRY_BACKOFF *= 2
 
 
 isp = ISP()
-
-while True:
-    if isp.LOGGED_IN:
-        isp.logout()
-    else:
-        isp.login()
-
-    inp = input("Press 'c' to continue, anything else to exit.")
-    if inp.lower() != 'c':
-        break
+isp.rotate_ip()
