@@ -1,0 +1,7 @@
+logs/
+drivers/
+__pycache__/
+*.pyc
+.idea/
+env/
+.env
